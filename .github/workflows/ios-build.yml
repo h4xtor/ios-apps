@@ -1,0 +1,69 @@
+name: ios-build
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "PhilipsRemote/**"
+      - ".github/workflows/ios-build.yml"
+  pull_request:
+    paths:
+      - "PhilipsRemote/**"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: PhilipsRemote
+    runs-on: macos-15
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        working-directory: PhilipsRemote
+        run: xcodegen generate
+
+      - name: Build for simulator
+        working-directory: PhilipsRemote
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project PhilipsRemote.xcodeproj \
+            -scheme PhilipsRemote \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            build
+
+      - name: Package app bundle
+        working-directory: PhilipsRemote
+        run: |
+          APP=$(find build/Build/Products -name "*.app" -maxdepth 3 | head -n 1)
+          echo "app: $APP"
+          mkdir -p out
+          ditto -c -k --sequesterRsrc --keepParent "$APP" "out/PhilipsRemote-simulator.zip"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PhilipsRemote-simulator
+          path: PhilipsRemote/out/PhilipsRemote-simulator.zip
+          if-no-files-found: error
+          retention-days: 14
