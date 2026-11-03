@@ -38,10 +38,7 @@ final class PhilipsTVClient: NSObject, @unchecked Sendable {
     private(set) var apiVersion: Int
 
     private let secureSession: URLSession
-    private let requestLock = NSLock()
-    private var lastRequestAt: Date = .distantPast
-    private let minimumInterval: TimeInterval = 0.12
-
+    private let pacer = Pacer(interval: 0.12)
     private let timeout: TimeInterval = 8
 
     static let httpPort  = 1925
@@ -167,8 +164,10 @@ final class PhilipsTVClient: NSObject, @unchecked Sendable {
             }
         }
 
+        let detail = lastError?.localizedDescription
         throw TVError.transport(
-            "Ingen kontakt til TV'et på \(address). Kontrollér strøm, Wi-Fi og IP-adresse."
+            "Ingen kontakt til TV'et på \(address)."
+                + (detail.map { " \($0)" } ?? " Kontrollér strøm, Wi-Fi og IP-adresse.")
         )
     }
 
@@ -192,15 +191,7 @@ final class PhilipsTVClient: NSObject, @unchecked Sendable {
     }
 
     private func pace() async {
-        requestLock.lock()
-        let elapsed = Date().timeIntervalSince(lastRequestAt)
-        let wait = max(0, minimumInterval - elapsed)
-        lastRequestAt = Date().addingTimeInterval(wait)
-        requestLock.unlock()
-
-        if wait > 0 {
-            try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
-        }
+        await pacer.wait()
     }
 
     // MARK: Discovery
@@ -327,7 +318,7 @@ final class PhilipsTVClient: NSObject, @unchecked Sendable {
         let target = Swift.max(minValue, Swift.min(maxValue, value))
         let isMuted = muted ?? (current["muted"] as? Bool ?? false)
 
-        try await request("POST", "audio/volume", json: ["current": target, "muted": isMuted])
+        _ = try await request("POST", "audio/volume", json: ["current": target, "muted": isMuted])
         return VolumeState(current: target, min: minValue, max: maxValue, muted: isMuted)
     }
 
@@ -514,6 +505,33 @@ final class StoredCredentials: @unchecked Sendable {
     func set(_ username: String, _ password: String, for address: String) {
         guard let data = try? JSONEncoder().encode([username, password]) else { return }
         Keychain.set(data.base64EncodedString(), for: "cred." + address)
+    }
+}
+
+// MARK: - Pacing
+
+/// Philips' web server falls over on burst traffic. Every request waits at
+/// least 120 ms after the previous one started, and the actor keeps that
+/// invariant without a blocking lock.
+private actor Pacer {
+    private var lastRequestAt = Date.distantPast
+    private let interval: TimeInterval
+
+    init(interval: TimeInterval) {
+        self.interval = interval
+    }
+
+    func wait() async {
+        let now = Date()
+        let elapsed = now.timeIntervalSince(lastRequestAt)
+
+        if elapsed < interval {
+            let delay = interval - elapsed
+            lastRequestAt = now.addingTimeInterval(delay)
+            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+        } else {
+            lastRequestAt = now
+        }
     }
 }
 
